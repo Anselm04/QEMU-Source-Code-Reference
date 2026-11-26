@@ -1,0 +1,52 @@
+name: Import QEMU reference
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/import-qemu.yml']
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  import:
+    if: github.repository == 'Anselm04/QEMU-Source-Code-Reference' && github.ref == 'refs/heads/main' && github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - name: Import and verify
+        shell: bash
+        run: |
+          set -euo pipefail
+          git init "$RUNNER_TEMP/upstream"
+          git -C "$RUNNER_TEMP/upstream" fetch --depth 1 https://github.com/qemu/qemu.git 16067c8ad46433975758ffa9f38a2646e8b641af
+          git -C "$RUNNER_TEMP/upstream" checkout --detach FETCH_HEAD
+          test "$(git -C "$RUNNER_TEMP/upstream" rev-parse HEAD^{tree})" = cf4403217f369675f75f341db6db548fd47dd5fe
+          python3 - <<'PY'
+          import os, subprocess, pathlib, shutil
+          src=pathlib.Path(os.environ['RUNNER_TEMP'])/'upstream'
+          entries=subprocess.check_output(['git','-C',str(src),'ls-tree','-rz','HEAD']).split(b'\0')
+          count=0
+          for entry in entries:
+              if not entry: continue
+              meta,raw=entry.split(b'\t',1)
+              mode,kind,sha=meta.split()
+              p=os.fsdecode(raw)
+              if p.startswith('.github/workflows/') or p in ('.github/dependabot.yml','.github/dependabot.yaml') or kind!=b'blob' or mode==b'120000': continue
+              dest=pathlib.Path(p)
+              dest.parent.mkdir(parents=True,exist_ok=True)
+              data=subprocess.check_output(['git','-C',str(src),'cat-file','blob',sha.decode()])
+              dest.write_bytes(data)
+              dest.chmod(0o755 if mode==b'100755' else 0o644)
+              actual=subprocess.check_output(['git','hash-object','--no-filters',str(dest)]).strip()
+              assert actual==sha,p
+              subprocess.run(['git','hash-object','-w','--no-filters',str(dest)],check=True,stdout=subprocess.DEVNULL)
+              subprocess.run(['git','update-index','--add','--cacheinfo',mode.decode(),sha.decode(),p],check=True)
+              assert subprocess.check_output(['git','rev-parse',':'+p]).strip()==sha,p
+              count+=1
+          print(f'Verified {count} upstream files')
+          PY
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git diff --cached --quiet && exit 0
+          git commit -m "Import verified upstream QEMU reference"
+          git push origin HEAD:main
